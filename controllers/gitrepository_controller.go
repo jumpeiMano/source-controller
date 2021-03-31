@@ -21,8 +21,16 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/fluxcd/pkg/apis/meta"
+	"github.com/fluxcd/pkg/runtime/events"
+	"github.com/fluxcd/pkg/runtime/metrics"
+	"github.com/fluxcd/pkg/runtime/predicates"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
+	"github.com/fluxcd/source-controller/pkg/git"
+	"github.com/fluxcd/source-controller/pkg/git/strategy"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -36,15 +44,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-
-	"github.com/fluxcd/pkg/apis/meta"
-	"github.com/fluxcd/pkg/runtime/events"
-	"github.com/fluxcd/pkg/runtime/metrics"
-	"github.com/fluxcd/pkg/runtime/predicates"
-
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
-	"github.com/fluxcd/source-controller/pkg/git"
-	"github.com/fluxcd/source-controller/pkg/git/strategy"
 )
 
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories,verbs=get;list;watch;create;update;patch;delete
@@ -183,12 +182,18 @@ func (r *GitRepositoryReconciler) reconcile(ctx context.Context, repository sour
 	// determine auth method
 	auth := &git.Auth{}
 	if repository.Spec.SecretRef != nil {
+		opt := git.CheckoutOptions{
+			GitImplementation: repository.Spec.GitImplementation,
+			RecurseSubmodules: repository.Spec.RecurseSubmodules,
+			Depth:             1,
+		}
+		if repository.Spec.Ignore != nil {
+			opt.Depth = 0
+		}
 		authStrategy, err := strategy.AuthSecretStrategyForURL(
 			repository.Spec.URL,
-			git.CheckoutOptions{
-				GitImplementation: repository.Spec.GitImplementation,
-				RecurseSubmodules: repository.Spec.RecurseSubmodules,
-			})
+			opt,
+		)
 		if err != nil {
 			return sourcev1.GitRepositoryNotReady(repository, sourcev1.AuthenticationFailedReason, err.Error()), err
 		}
@@ -212,12 +217,18 @@ func (r *GitRepositoryReconciler) reconcile(ctx context.Context, repository sour
 		}
 	}
 
+	opt := git.CheckoutOptions{
+		GitImplementation: repository.Spec.GitImplementation,
+		RecurseSubmodules: repository.Spec.RecurseSubmodules,
+		Depth:             1,
+	}
+	if repository.Spec.Ignore != nil {
+		opt.Depth = 0
+	}
 	checkoutStrategy, err := strategy.CheckoutStrategyForRef(
 		repository.Spec.Reference,
-		git.CheckoutOptions{
-			GitImplementation: repository.Spec.GitImplementation,
-			RecurseSubmodules: repository.Spec.RecurseSubmodules,
-		})
+		opt,
+	)
 	if err != nil {
 		return sourcev1.GitRepositoryNotReady(repository, sourcev1.GitOperationFailedReason, err.Error()), err
 	}
@@ -227,13 +238,33 @@ func (r *GitRepositoryReconciler) reconcile(ctx context.Context, repository sour
 	}
 
 	// return early on unchanged revision
+	oldArtifact := repository.GetArtifact()
 	artifact := r.Storage.NewArtifactFor(repository.Kind, repository.GetObjectMeta(), revision, fmt.Sprintf("%s.tar.gz", commit.Hash()))
-	if apimeta.IsStatusConditionTrue(repository.Status.Conditions, meta.ReadyCondition) && repository.GetArtifact().HasRevision(artifact.Revision) {
+	if apimeta.IsStatusConditionTrue(repository.Status.Conditions, meta.ReadyCondition) && oldArtifact.HasRevision(artifact.Revision) {
 		if artifact.URL != repository.GetArtifact().URL {
 			r.Storage.SetArtifactURL(repository.GetArtifact())
 			repository.Status.URL = r.Storage.SetHostname(repository.Status.URL)
 		}
 		return repository, nil
+	}
+
+	// return early on changed only ignore files
+	if oldArtifact != nil && repository.Spec.Ignore != nil {
+		startHash := revision
+		if strings.Contains(startHash, "/") {
+			startHash = strings.Split(startHash, "/")[1]
+		}
+		endHash := oldArtifact.Revision
+		if strings.Contains(endHash, "/") {
+			endHash = strings.Split(endHash, "/")[1]
+		}
+		exists, err := checkoutStrategy.ExistsTargetFilesInRecentlyCommits(startHash, endHash, *repository.Spec.Ignore)
+		if err != nil {
+			return sourcev1.GitRepositoryNotReady(repository, sourcev1.GitOperationFailedReason, err.Error()), err
+		}
+		if !exists {
+			return repository, nil
+		}
 	}
 
 	// verify PGP signature

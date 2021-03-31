@@ -38,11 +38,13 @@ type Commit interface {
 
 type CheckoutStrategy interface {
 	Checkout(ctx context.Context, path, url string, auth *Auth) (Commit, string, error)
+	ExistsTargetFilesInRecentlyCommits(startHash, endHash, ignore string) (bool, error)
 }
 
 type CheckoutOptions struct {
 	GitImplementation string
 	RecurseSubmodules bool
+	Depth             int
 }
 
 // TODO(hidde): candidate for refactoring, so that we do not directly

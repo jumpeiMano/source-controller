@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"crypto/sha1"
@@ -32,13 +31,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"github.com/fluxcd/pkg/lockedfile"
-
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 	"github.com/fluxcd/source-controller/internal/fs"
+	"github.com/fluxcd/source-controller/internal/git"
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -400,22 +398,6 @@ func (s *Storage) LocalPath(artifact sourcev1.Artifact) string {
 	return filepath.Join(s.BasePath, artifact.Path)
 }
 
-// getPatterns collects ignore patterns from the given reader and returns them
-// as a gitignore.Pattern slice.
-func getPatterns(reader io.Reader, path []string) []gitignore.Pattern {
-	var ps []gitignore.Pattern
-	scanner := bufio.NewScanner(reader)
-
-	for scanner.Scan() {
-		s := scanner.Text()
-		if !strings.HasPrefix(s, "#") && len(strings.TrimSpace(s)) > 0 {
-			ps = append(ps, gitignore.ParsePattern(s, path))
-		}
-	}
-
-	return ps
-}
-
 // loadExcludePatterns loads the excluded patterns from sourceignore or other
 // sources.
 func loadExcludePatterns(dir string, ignore *string) ([]gitignore.Pattern, error) {
@@ -434,12 +416,12 @@ func loadExcludePatterns(dir string, ignore *string) ([]gitignore.Pattern, error
 
 		if f, err := os.Open(filepath.Join(dir, excludeFile)); err == nil {
 			defer f.Close()
-			ps = append(ps, getPatterns(f, path)...)
+			ps = append(ps, git.GetIgnorePatterns(f, path)...)
 		} else if !os.IsNotExist(err) {
 			return nil, err
 		}
 	} else {
-		ps = append(ps, getPatterns(bytes.NewBufferString(*ignore), path)...)
+		ps = append(ps, git.GetIgnorePatterns(bytes.NewBufferString(*ignore), path)...)
 	}
 
 	return ps, nil

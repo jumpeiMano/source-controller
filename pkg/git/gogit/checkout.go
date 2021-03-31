@@ -17,46 +17,51 @@ limitations under the License.
 package gogit
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	extgogit "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-
 	"github.com/fluxcd/pkg/gitutil"
 	"github.com/fluxcd/pkg/version"
-
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
+	git2 "github.com/fluxcd/source-controller/internal/git"
 	"github.com/fluxcd/source-controller/pkg/git"
+	extgogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
 func CheckoutStrategyForRef(ref *sourcev1.GitRepositoryRef, opt git.CheckoutOptions) git.CheckoutStrategy {
 	switch {
 	case ref == nil:
-		return &CheckoutBranch{branch: git.DefaultBranch}
+		return &CheckoutBranch{branch: git.DefaultBranch, depth: opt.Depth}
 	case ref.SemVer != "":
-		return &CheckoutSemVer{semVer: ref.SemVer, recurseSubmodules: opt.RecurseSubmodules}
+		return &CheckoutSemVer{semVer: ref.SemVer, recurseSubmodules: opt.RecurseSubmodules, depth: opt.Depth}
 	case ref.Tag != "":
-		return &CheckoutTag{tag: ref.Tag, recurseSubmodules: opt.RecurseSubmodules}
+		return &CheckoutTag{tag: ref.Tag, recurseSubmodules: opt.RecurseSubmodules, depth: opt.Depth}
 	case ref.Commit != "":
-		strategy := &CheckoutCommit{branch: ref.Branch, commit: ref.Commit, recurseSubmodules: opt.RecurseSubmodules}
+		strategy := &CheckoutCommit{branch: ref.Branch, commit: ref.Commit, recurseSubmodules: opt.RecurseSubmodules, depth: opt.Depth}
 		if strategy.branch == "" {
 			strategy.branch = git.DefaultBranch
 		}
 		return strategy
 	case ref.Branch != "":
-		return &CheckoutBranch{branch: ref.Branch, recurseSubmodules: opt.RecurseSubmodules}
+		return &CheckoutBranch{branch: ref.Branch, recurseSubmodules: opt.RecurseSubmodules, depth: opt.Depth}
 	default:
-		return &CheckoutBranch{branch: git.DefaultBranch}
+		return &CheckoutBranch{branch: git.DefaultBranch, depth: opt.Depth}
 	}
 }
 
 type CheckoutBranch struct {
+	repo              *extgogit.Repository
 	branch            string
 	recurseSubmodules bool
+	depth             int
 }
 
 func (c *CheckoutBranch) Checkout(ctx context.Context, path, url string, auth *git.Auth) (git.Commit, string, error) {
@@ -67,7 +72,7 @@ func (c *CheckoutBranch) Checkout(ctx context.Context, path, url string, auth *g
 		ReferenceName:     plumbing.NewBranchReferenceName(c.branch),
 		SingleBranch:      true,
 		NoCheckout:        false,
-		Depth:             1,
+		Depth:             c.depth,
 		RecurseSubmodules: recurseSubmodules(c.recurseSubmodules),
 		Progress:          nil,
 		Tags:              extgogit.NoTags,
@@ -76,6 +81,7 @@ func (c *CheckoutBranch) Checkout(ctx context.Context, path, url string, auth *g
 	if err != nil {
 		return nil, "", fmt.Errorf("unable to clone '%s', error: %w", url, gitutil.GoGitError(err))
 	}
+	c.repo = repo
 	head, err := repo.Head()
 	if err != nil {
 		return nil, "", fmt.Errorf("git resolve HEAD error: %w", err)
@@ -87,9 +93,15 @@ func (c *CheckoutBranch) Checkout(ctx context.Context, path, url string, auth *g
 	return &Commit{commit}, fmt.Sprintf("%s/%s", c.branch, head.Hash().String()), nil
 }
 
+func (c *CheckoutBranch) ExistsTargetFilesInRecentlyCommits(startHash, endHash, ignore string) (bool, error) {
+	return existsTargetFilesInRecentlyCommits(c.repo, startHash, endHash, ignore)
+}
+
 type CheckoutTag struct {
+	repo              *extgogit.Repository
 	tag               string
 	recurseSubmodules bool
+	depth             int
 }
 
 func (c *CheckoutTag) Checkout(ctx context.Context, path, url string, auth *git.Auth) (git.Commit, string, error) {
@@ -100,7 +112,7 @@ func (c *CheckoutTag) Checkout(ctx context.Context, path, url string, auth *git.
 		ReferenceName:     plumbing.NewTagReferenceName(c.tag),
 		SingleBranch:      true,
 		NoCheckout:        false,
-		Depth:             1,
+		Depth:             c.depth,
 		RecurseSubmodules: recurseSubmodules(c.recurseSubmodules),
 		Progress:          nil,
 		Tags:              extgogit.NoTags,
@@ -109,6 +121,7 @@ func (c *CheckoutTag) Checkout(ctx context.Context, path, url string, auth *git.
 	if err != nil {
 		return nil, "", fmt.Errorf("unable to clone '%s', error: %w", url, err)
 	}
+	c.repo = repo
 	head, err := repo.Head()
 	if err != nil {
 		return nil, "", fmt.Errorf("git resolve HEAD error: %w", err)
@@ -120,10 +133,16 @@ func (c *CheckoutTag) Checkout(ctx context.Context, path, url string, auth *git.
 	return &Commit{commit}, fmt.Sprintf("%s/%s", c.tag, head.Hash().String()), nil
 }
 
+func (c *CheckoutTag) ExistsTargetFilesInRecentlyCommits(startHash, endHash, ignore string) (bool, error) {
+	return existsTargetFilesInRecentlyCommits(c.repo, startHash, endHash, ignore)
+}
+
 type CheckoutCommit struct {
+	repo              *extgogit.Repository
 	branch            string
 	commit            string
 	recurseSubmodules bool
+	depth             int
 }
 
 func (c *CheckoutCommit) Checkout(ctx context.Context, path, url string, auth *git.Auth) (git.Commit, string, error) {
@@ -134,6 +153,7 @@ func (c *CheckoutCommit) Checkout(ctx context.Context, path, url string, auth *g
 		ReferenceName:     plumbing.NewBranchReferenceName(c.branch),
 		SingleBranch:      true,
 		NoCheckout:        false,
+		Depth:             c.depth,
 		RecurseSubmodules: recurseSubmodules(c.recurseSubmodules),
 		Progress:          nil,
 		Tags:              extgogit.NoTags,
@@ -142,6 +162,7 @@ func (c *CheckoutCommit) Checkout(ctx context.Context, path, url string, auth *g
 	if err != nil {
 		return nil, "", fmt.Errorf("unable to clone '%s', error: %w", url, err)
 	}
+	c.repo = repo
 	w, err := repo.Worktree()
 	if err != nil {
 		return nil, "", fmt.Errorf("git worktree error: %w", err)
@@ -160,9 +181,15 @@ func (c *CheckoutCommit) Checkout(ctx context.Context, path, url string, auth *g
 	return &Commit{commit}, fmt.Sprintf("%s/%s", c.branch, commit.Hash.String()), nil
 }
 
+func (c *CheckoutCommit) ExistsTargetFilesInRecentlyCommits(startHash, endHash, ignore string) (bool, error) {
+	return existsTargetFilesInRecentlyCommits(c.repo, startHash, endHash, ignore)
+}
+
 type CheckoutSemVer struct {
+	repo              *extgogit.Repository
 	semVer            string
 	recurseSubmodules bool
+	depth             int
 }
 
 func (c *CheckoutSemVer) Checkout(ctx context.Context, path, url string, auth *git.Auth) (git.Commit, string, error) {
@@ -176,7 +203,7 @@ func (c *CheckoutSemVer) Checkout(ctx context.Context, path, url string, auth *g
 		Auth:              auth.AuthMethod,
 		RemoteName:        git.DefaultOrigin,
 		NoCheckout:        false,
-		Depth:             1,
+		Depth:             c.depth,
 		RecurseSubmodules: recurseSubmodules(c.recurseSubmodules),
 		Progress:          nil,
 		Tags:              extgogit.AllTags,
@@ -185,6 +212,7 @@ func (c *CheckoutSemVer) Checkout(ctx context.Context, path, url string, auth *g
 	if err != nil {
 		return nil, "", fmt.Errorf("unable to clone '%s', error: %w", url, err)
 	}
+	c.repo = repo
 
 	repoTags, err := repo.Tags()
 	if err != nil {
@@ -210,7 +238,7 @@ func (c *CheckoutSemVer) Checkout(ctx context.Context, path, url string, auth *g
 	})
 
 	var matchedVersions semver.Collection
-	for tag, _ := range tags {
+	for tag := range tags {
 		v, err := version.ParseVersion(tag)
 		if err != nil {
 			continue
@@ -267,9 +295,52 @@ func (c *CheckoutSemVer) Checkout(ctx context.Context, path, url string, auth *g
 	return &Commit{commit}, fmt.Sprintf("%s/%s", t, head.Hash().String()), nil
 }
 
+func (c *CheckoutSemVer) ExistsTargetFilesInRecentlyCommits(startHash, endHash, ignore string) (bool, error) {
+	return existsTargetFilesInRecentlyCommits(c.repo, startHash, endHash, ignore)
+}
+
 func recurseSubmodules(recurse bool) extgogit.SubmoduleRescursivity {
 	if recurse {
 		return extgogit.DefaultSubmoduleRecursionDepth
 	}
 	return extgogit.NoRecurseSubmodules
+}
+
+func existsTargetFilesInRecentlyCommits(repo *extgogit.Repository, startHash, endHash, ignore string,
+) (bool, error) {
+	o := extgogit.LogOptions{
+		From:  plumbing.NewHash(startHash),
+		Order: extgogit.LogOrderCommitterTime,
+	}
+	commitIter, err := repo.Log(&o)
+	if err != nil {
+		return false, fmt.Errorf("git log error: %w", err)
+	}
+	defer commitIter.Close()
+
+	ps := git2.GetIgnorePatterns(bytes.NewBufferString(ignore), nil)
+	matcher := gitignore.NewMatcher(ps)
+	for {
+		c, err := commitIter.Next()
+		switch err {
+		case nil:
+			if c.Hash.String() == endHash {
+				return false, nil
+			}
+		case io.EOF:
+			return false, nil
+		default:
+			return false, fmt.Errorf("git commitIter.Next error: %w", err)
+		}
+
+		fs, err := c.Stats()
+		if err != nil {
+			return false, fmt.Errorf("git commit.Stats error: %w", err)
+		}
+		for _, f := range fs {
+			if match := matcher.Match(strings.Split(f.Name, "/"), false); !match {
+				return true, nil
+			}
+		}
+	}
 }
