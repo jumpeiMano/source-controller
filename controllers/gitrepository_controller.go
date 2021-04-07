@@ -248,7 +248,7 @@ func (r *GitRepositoryReconciler) reconcile(ctx context.Context, repository sour
 		return repository, nil
 	}
 
-	// return early on changed only ignore files
+	// return early on changed only ignored files
 	if oldArtifact != nil && repository.Spec.Ignore != nil {
 		startHash := revision
 		if strings.Contains(startHash, "/") {
