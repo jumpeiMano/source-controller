@@ -79,6 +79,11 @@ func (c *CheckoutBranch) Checkout(ctx context.Context, path, url string, auth *g
 	return &Commit{commit}, fmt.Sprintf("%s/%s", c.branch, head.Target().String()), nil
 }
 
+func (c *CheckoutBranch) ExistsTargetFilesInRecentlyCommits(_, _, _ string) (bool, error) {
+	//	TODO: implement
+	return true, nil
+}
+
 type CheckoutTag struct {
 	tag string
 }
@@ -113,6 +118,11 @@ func (c *CheckoutTag) Checkout(ctx context.Context, path, url string, auth *git.
 		return nil, "", fmt.Errorf("git commit '%s' not found: %w", head.Target(), err)
 	}
 	return &Commit{commit}, fmt.Sprintf("%s/%s", c.tag, head.Target().String()), nil
+}
+
+func (c *CheckoutTag) ExistsTargetFilesInRecentlyCommits(_, _, _ string) (bool, error) {
+	//	TODO: implement
+	return true, nil
 }
 
 type CheckoutCommit struct {
@@ -154,6 +164,11 @@ func (c *CheckoutCommit) Checkout(ctx context.Context, path, url string, auth *g
 	}
 
 	return &Commit{commit}, fmt.Sprintf("%s/%s", c.branch, commit.Id().String()), nil
+}
+
+func (c *CheckoutCommit) ExistsTargetFilesInRecentlyCommits(_, _, _ string) (bool, error) {
+	//	TODO: implement
+	return true, nil
 }
 
 type CheckoutSemVer struct {
@@ -220,4 +235,9 @@ func (c *CheckoutSemVer) Checkout(ctx context.Context, path, url string, auth *g
 	}
 
 	return &Commit{commit}, fmt.Sprintf("%s/%s", t, head.Target().String()), nil
+}
+
+func (c *CheckoutSemVer) ExistsTargetFilesInRecentlyCommits(_, _, _ string) (bool, error) {
+	//	TODO: implement
+	return true, nil
 }
